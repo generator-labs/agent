@@ -1,0 +1,6 @@
+
+Generator Labs Agent - TODO
+===========================
+
+- add an optional environment variable, that when set, logs everything using JSON instead, which is easier to
+  parse (and trigger on) through tools like Cloudwatch and Splunk.

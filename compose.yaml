@@ -1,0 +1,24 @@
+services:
+  agent:
+    image: ghcr.io/generator-labs/agent:latest
+    networks:
+      - agent-network
+    pull_policy: build
+    build:
+      context: agent
+      tags:
+        - ghcr.io/generator-labs/agent:${VERSION}
+    tty: false
+    stdin_open: false
+    restart: unless-stopped
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep agent || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+networks:
+  agent-network:
+    enable_ipv6: true

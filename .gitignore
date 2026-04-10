@@ -1,0 +1,9 @@
+*.a
+*.o
+*.so
+.env
+build
+build-test
+agent/agent
+agent/version.h
+.cache

@@ -1,0 +1,13 @@
+//
+// This file is part of the Generator Labs Agent
+//
+// For the full copyright and license information, please view the LICENSE file that was distributed with this source code.
+//
+#ifndef __VERSION_H__
+#define __VERSION_H__
+
+#define VERSION "@PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@"
+#define RELEASE "@PROJECT_VERSION_PATCH@"
+#define BUILD "@PROJECT_VERSION_TWEAK@"
+
+#endif // __VERSION_H__
