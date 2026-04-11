@@ -3,6 +3,8 @@
 //
 #include <gtest/gtest.h>
 #include <jansson.h>
+#include <chrono>
+#include <thread>
 #include "ctask_manager.h"
 
 class TestableTaskManager {
@@ -49,8 +51,10 @@ TEST_F(CTaskManagerProcessTest, ArrayWithMissingTaskTypeReturnsTrue) {
 }
 
 TEST_F(CTaskManagerProcessTest, ValidCertCheckPayloadReturnsTrue) {
-    // Valid payload that reaches thread spawn — thread will fail internally
-    // (no real endpoint), but process() returns true
+    // Valid payload structure for a cert check — address_type intentionally omitted
+    // so the worker fails at valid_address_type() before any DNS or socket I/O.
+    // Including address_type caused the worker to block in poll() on localhost:443,
+    // which prevented the jthread from joining on binary exit, stalling the test.
     std::string payload = R"([{
         "id": "task-001",
         "type": 5,
@@ -59,12 +63,21 @@ TEST_F(CTaskManagerProcessTest, ValidCertCheckPayloadReturnsTrue) {
             "event_type": 1,
             "protocol": 1,
             "port": 443,
-            "address_type": 1,
             "hostname": "localhost"
         }
     }])";
 
     EXPECT_TRUE(mgr.process(payload));
+
+    //
+    // wait for the worker to terminate so the singleton is clean for subsequent
+    // tests and the binary can exit without blocking on jthread::join()
+    //
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (mgr.active_workers() > 0 && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 }
 
 TEST_F(CTaskManagerProcessTest, MaxActiveWorkersIsThirtyTwo) {
