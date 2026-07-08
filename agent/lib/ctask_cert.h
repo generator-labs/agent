@@ -16,8 +16,14 @@
 class ctask_cert : public ctask
 {
     public:
-        static constexpr int FETCH_MAX_ATTEMPTS  = 3;
-        static constexpr int FETCH_RETRY_DELAY_S = 2;
+        //
+        // in-process retry policy for transient fetch failures; the delay
+        // grows exponentially per attempt and is capped, with jitter applied
+        // to decorrelate retries against a shared source IP
+        //
+        static constexpr int FETCH_MAX_ATTEMPTS        = 4;
+        static constexpr int FETCH_RETRY_BASE_DELAY_MS = 4000;
+        static constexpr int FETCH_RETRY_MAX_DELAY_MS  = 15000;
 
 
     friend class TestableCertTask;  // For unit testing
@@ -39,6 +45,12 @@ class ctask_cert : public ctask
 
     private:
         static bool is_fetch_retryable(const cert_result_t _code);
+
+        //
+        // exponential backoff (with jitter) in milliseconds for the given
+        // 1-based retry attempt
+        //
+        static int retry_delay_ms(const int _attempt);
 
         profile_address_type_t is_ip(const std::string &_data);
 

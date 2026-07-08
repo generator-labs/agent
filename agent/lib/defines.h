@@ -43,6 +43,7 @@ enum class cert_result_t : int {
     NETWORK_STARTTLS_FAILURE       = 50103,
     NETWORK_SSL_FAILURE            = 50104,
     NETWORK_IP_LOOKUP_FAILED       = 50105,
+    NETWORK_PROTOCOL_REJECTED      = 50107,
 
     NONE                           = 0
 };

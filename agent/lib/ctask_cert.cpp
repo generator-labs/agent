@@ -14,6 +14,7 @@
 #include <cstring>
 #include <iomanip>
 #include <thread>
+#include <random>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -153,10 +154,31 @@ ctask_cert::~ctask_cert()
 }
 bool ctask_cert::is_fetch_retryable(const cert_result_t _code)
 {
-    return (_code == cert_result_t::NETWORK_SOCKET_FAILURE  ||
-            _code == cert_result_t::NETWORK_SOCKET_TIMEOUT  ||
+    return (_code == cert_result_t::NETWORK_SOCKET_FAILURE   ||
+            _code == cert_result_t::NETWORK_SOCKET_TIMEOUT   ||
             _code == cert_result_t::NETWORK_STARTTLS_FAILURE ||
-            _code == cert_result_t::NETWORK_SSL_FAILURE);
+            _code == cert_result_t::NETWORK_SSL_FAILURE      ||
+            _code == cert_result_t::NETWORK_PROTOCOL_REJECTED);
+}
+int ctask_cert::retry_delay_ms(const int _attempt)
+{
+    //
+    // exponential delay: base * 2^(attempt-1), capped
+    //
+    int delay = FETCH_RETRY_BASE_DELAY_MS << (_attempt - 1);
+    if ( (delay > FETCH_RETRY_MAX_DELAY_MS) || (delay <= 0) )
+    {
+        delay = FETCH_RETRY_MAX_DELAY_MS;
+    }
+
+    //
+    // equal jitter: sleep a random value in [delay/2, delay] so retries from
+    // our shared source IP don't fire in lockstep against a rate-limiting server
+    //
+    static thread_local std::mt19937 generator(std::random_device{}());
+    std::uniform_int_distribution<int> distribution(delay / 2, delay);
+
+    return distribution(generator);
 }
 bool ctask_cert::run()
 {
@@ -275,7 +297,7 @@ bool ctask_cert::run()
                 {
                     json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                    clog::instance().log(LOG_ERROR, "ctask_cert::run(): invalid IP address provided: '{}' {}", ip, strerror(errno));
+                    clog::instance().log(LOG_WARN, "ctask_cert::run(): invalid IP address provided: '{}' {}", ip, strerror(errno));
                     goto attempt_cleanup;
                 }
             }
@@ -285,7 +307,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed to create socket() {}:{} - {}", ip, this->m_port, strerror(errno));
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed to create socket() {}:{} - {}", ip, this->m_port, strerror(errno));
                 goto attempt_cleanup;
             }
 
@@ -297,7 +319,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on fcntl(F_GETFL) for {}:{} - {}", ip, this->m_port, strerror(errno));
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on fcntl(F_GETFL) for {}:{} - {}", ip, this->m_port, strerror(errno));
                 last_retryable = cert_result_t::NETWORK_SOCKET_FAILURE;
                 goto attempt_cleanup;
             }
@@ -306,7 +328,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on fcntl(F_SETFL) for {}:{} - {}", ip, this->m_port, strerror(errno));
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on fcntl(F_SETFL) for {}:{} - {}", ip, this->m_port, strerror(errno));
                 last_retryable = cert_result_t::NETWORK_SOCKET_FAILURE;
                 goto attempt_cleanup;
             }
@@ -317,7 +339,7 @@ bool ctask_cert::run()
                 {
                     json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                    clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on connect() to {}:{} - {}", ip, this->m_port, strerror(errno));
+                    clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on connect() to {}:{} - {}", ip, this->m_port, strerror(errno));
                     last_retryable = cert_result_t::NETWORK_SOCKET_FAILURE;
                     goto attempt_cleanup;
                 }
@@ -334,7 +356,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_TIMEOUT)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): timeout on connect attempt to {}:{} - {}", ip, this->m_port, strerror(errno));
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): timeout on connect attempt to {}:{} - {}", ip, this->m_port, strerror(errno));
                 last_retryable = cert_result_t::NETWORK_SOCKET_TIMEOUT;
                 goto attempt_cleanup;
             }
@@ -342,7 +364,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): poll() reported socket error on {}:{}.", ip, this->m_port);
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): poll() reported socket error on {}:{}.", ip, this->m_port);
                 last_retryable = cert_result_t::NETWORK_SOCKET_FAILURE;
                 goto attempt_cleanup;
             }
@@ -350,7 +372,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on getsockopt(SO_ERROR) for {}:{} - {}", ip, this->m_port, strerror(errno));
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on getsockopt(SO_ERROR) for {}:{} - {}", ip, this->m_port, strerror(errno));
                 last_retryable = cert_result_t::NETWORK_SOCKET_FAILURE;
                 goto attempt_cleanup;
             }
@@ -358,7 +380,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): connect() did not complete for {}:{} - {}", ip, this->m_port, strerror(ret));
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): connect() did not complete for {}:{} - {}", ip, this->m_port, strerror(ret));
                 last_retryable = cert_result_t::NETWORK_SOCKET_FAILURE;
                 goto attempt_cleanup;
             }
@@ -370,7 +392,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed to restore socket flags for {}:{} - {}", ip, this->m_port, strerror(errno));
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed to restore socket flags for {}:{} - {}", ip, this->m_port, strerror(errno));
                 last_retryable = cert_result_t::NETWORK_SOCKET_FAILURE;
                 goto attempt_cleanup;
             }
@@ -382,7 +404,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on setsockopt(SO_RCVTIMEO) for {}:{} - {}", ip, this->m_port, strerror(errno));
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on setsockopt(SO_RCVTIMEO) for {}:{} - {}", ip, this->m_port, strerror(errno));
                 last_retryable = cert_result_t::NETWORK_SOCKET_FAILURE;
                 goto attempt_cleanup;
             }
@@ -390,7 +412,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SOCKET_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on setsockopt(SO_SNDTIMEO) for {}:{} - {}", ip, this->m_port, strerror(errno));
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on setsockopt(SO_SNDTIMEO) for {}:{} - {}", ip, this->m_port, strerror(errno));
                 last_retryable = cert_result_t::NETWORK_SOCKET_FAILURE;
                 goto attempt_cleanup;
             }
@@ -405,10 +427,12 @@ bool ctask_cert::run()
             //
             if (protocol.starttls() == false)
             {
-                json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_STARTTLS_FAILURE)));
+                cert_result_t rc = protocol.result_code();
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on starttls()");
-                last_retryable = cert_result_t::NETWORK_STARTTLS_FAILURE;
+                json_array_append_new(error_codes, json_integer(static_cast<int>(rc)));
+
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on starttls()");
+                last_retryable = rc;
                 goto attempt_cleanup;
             }
 
@@ -420,7 +444,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_INTERNAL_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on SSL_ctx_new()");
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on SSL_ctx_new()");
                 goto attempt_cleanup;
             }
 
@@ -432,7 +456,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_INTERNAL_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on SSL_new()");
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on SSL_new()");
                 goto attempt_cleanup;
             }
 
@@ -448,7 +472,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_INTERNAL_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on SSL_set_tlsext_host_name()");
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on SSL_set_tlsext_host_name()");
                 goto attempt_cleanup;
             }
 
@@ -459,7 +483,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_SSL_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on SSL_connect()");
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on SSL_connect()");
                 last_retryable = cert_result_t::NETWORK_SSL_FAILURE;
                 goto attempt_cleanup;
             }
@@ -479,7 +503,7 @@ bool ctask_cert::run()
             {
                 json_array_append_new(error_codes, json_integer(static_cast<int>(cert_result_t::NETWORK_INTERNAL_FAILURE)));
 
-                clog::instance().log(LOG_ERROR, "ctask_cert::run(): failed on SSL_get_peer_cert_chain()");
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): failed on SSL_get_peer_cert_chain()");
                 goto attempt_cleanup;
             }
             if (sk_X509_num(chain) > 0)
@@ -550,8 +574,10 @@ bool ctask_cert::run()
                     break;
                 }
 
-                clog::instance().log(LOG_WARN, "ctask_cert::run(): connection attempt {}/{} failed, retrying in {}s...",
-                    attempt + 1, FETCH_MAX_ATTEMPTS, FETCH_RETRY_DELAY_S);
+                int delay_ms = ctask_cert::retry_delay_ms(attempt + 1);
+
+                clog::instance().log(LOG_WARN, "ctask_cert::run(): connection attempt {}/{} failed, retrying in {}ms...",
+                    attempt + 1, FETCH_MAX_ATTEMPTS, delay_ms);
 
                 json_decref(error_codes);
                 error_codes = json_array();
@@ -559,7 +585,7 @@ bool ctask_cert::run()
                 //
                 // shutdown-aware sleep - check m_running in small increments
                 //
-                for (int s = 0; s < FETCH_RETRY_DELAY_S * 10; s++)
+                for (int slept = 0; slept < delay_ms; slept += 100)
                 {
                     if (cagent::instance().m_running == false)
                     {
@@ -582,6 +608,19 @@ bool ctask_cert::run()
             }
 
             break;
+        }
+
+        //
+        // every attempt for this address ultimately failed - emit a single
+        // error-level log here, only after all retries are exhausted, so
+        // transient blips that later succeed don't raise alarms. error_codes is
+        // reset before each retry and stays empty on success, so a non-empty
+        // array means the final attempt failed
+        //
+        if (json_array_size(error_codes) > 0)
+        {
+            clog::instance().log(LOG_ERROR, "ctask_cert::run(): certificate check failed for {} ({}:{}).",
+                this->m_hostname, ip, this->m_port);
         }
 
         //
@@ -698,12 +737,12 @@ std::vector<std::string> ctask_cert::lookup(const std::string &_hn, const json_t
     //
     if ( (type == profile_address_type_t::IPV4) && ((_ad != profile_address_type_t::IPV4) && (_ad != profile_address_type_t::DUAL)) )
     {
-        clog::instance().log(LOG_ERROR, "ctask_cert::lookup({}): profile is {} but host type is {}.", _hn, static_cast<int>(_ad), static_cast<int>(type));
+        clog::instance().log(LOG_WARN, "ctask_cert::lookup({}): profile is {} but host type is {}.", _hn, static_cast<int>(_ad), static_cast<int>(type));
         return out;
     }
     if ( (type == profile_address_type_t::IPV6) && ((_ad != profile_address_type_t::IPV6) && (_ad != profile_address_type_t::DUAL)) )
     {
-        clog::instance().log(LOG_ERROR, "ctask_cert::lookup({}): profile is {} but host type is {}.", _hn, static_cast<int>(_ad), static_cast<int>(type));
+        clog::instance().log(LOG_WARN, "ctask_cert::lookup({}): profile is {} but host type is {}.", _hn, static_cast<int>(_ad), static_cast<int>(type));
         return out;
     }
 
@@ -728,7 +767,7 @@ std::vector<std::string> ctask_cert::lookup(const std::string &_hn, const json_t
         {
             if (json_is_string(value) == 0)
             {
-                clog::instance().log(LOG_ERROR, "ctask_cert::lookup(): override value must be a string.");
+                clog::instance().log(LOG_WARN, "ctask_cert::lookup(): override value must be a string.");
                 continue;
             }
 
@@ -737,12 +776,12 @@ std::vector<std::string> ctask_cert::lookup(const std::string &_hn, const json_t
 
             if ( (ov_type == profile_address_type_t::IPV4) && ((_ad != profile_address_type_t::IPV4) && (_ad != profile_address_type_t::DUAL)) )
             {
-                clog::instance().log(LOG_ERROR, "ctask_cert::lookup(): profile address type {} does not support ipv4 override value {}.", static_cast<int>(_ad), ov);
+                clog::instance().log(LOG_WARN, "ctask_cert::lookup(): profile address type {} does not support ipv4 override value {}.", static_cast<int>(_ad), ov);
                 continue;
             }
             if ( (ov_type == profile_address_type_t::IPV6) && ((_ad != profile_address_type_t::IPV6) && (_ad != profile_address_type_t::DUAL)) )
             {
-                clog::instance().log(LOG_ERROR, "ctask_cert::lookup(): profile address type {} does not support ipv6 override value {}.", static_cast<int>(_ad), ov);
+                clog::instance().log(LOG_WARN, "ctask_cert::lookup(): profile address type {} does not support ipv6 override value {}.", static_cast<int>(_ad), ov);
                 continue;
             }
 
@@ -766,7 +805,7 @@ std::vector<std::string> ctask_cert::lookup(const std::string &_hn, const json_t
         int err = getaddrinfo(_hn.c_str(), nullptr, &hints, &res);
         if (err != 0)
         {
-            clog::instance().log(LOG_ERROR, "ctask_cert::lookup({}): failed on getaddrinfo(): {}", _hn, gai_strerror(err));
+            clog::instance().log(LOG_WARN, "ctask_cert::lookup({}): failed on getaddrinfo(): {}", _hn, gai_strerror(err));
             return out;
         }
 

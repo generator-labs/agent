@@ -1,0 +1,33 @@
+
+Generator Labs Agent - Change Log
+=================================
+
+v1.1
+----
+- hardened the pre-TLS (STARTTLS) negotiation:
+  - smtp/imap/ftp/pop3 now validate the STARTTLS/STLS/AUTH TLS reply (the SMTP/FTP reply code,
+    POP3 "+OK", the IMAP tagged "OK") and read it through the buffered BIO with a leftover-bytes
+    check, instead of treating any bytes returned as success and proceeding into a plaintext
+    handshake. the banner/EHLO/greeting reply codes are validated too
+  - ccert_protocol::ldap() now validates the StartTLS ExtendedResponse (RFC 4511): it walks the
+    DER-encoded LDAPMessage and only proceeds to the TLS handshake on resultCode 0 (success); a
+    timeout, a malformed/truncated response, or a non-zero resultCode now fails instead of
+    proceeding blind (previously the reply was read and discarded and the handshake always ran)
+  - bio_gets() now drains a line longer than the read buffer to the next line boundary, so the
+    continuation/capability checks never run against a fragment
+- added the NETWORK_PROTOCOL_REJECTED (50107) result code. starttls() now
+  reports the specific code when the server actively refuses the negotiation (bad reply code,
+  tagged NO/BAD, -ERR, or a refused/malformed LDAP StartTLS) rather than the generic
+  NETWORK_STARTTLS_FAILURE; both remain retryable
+- changed the in-process retry policy from a fixed 3 attempts / 2s delay to 4 attempts with
+  exponential backoff and jitter (~4s, ~8s, capped at 15s, each a random value in [delay/2,
+  delay]). this rides out momentary rate-limiting and decorrelates retries from a shared source
+  IP; the sleep stays shutdown-aware
+- cut error-log noise that was driving spurious CloudWatch alarms: per-attempt fetch/negotiation
+  failures now log at WARN, and an error-level log is emitted only once per address after all
+  retry attempts are exhausted. DNS lookup and ip-override validation failures were also
+  downgraded to WARN
+
+v1.0
+----
+- initial release

@@ -17,9 +17,22 @@ class ccert_protocol
         BIO *m_sbio;
         char m_buffer[BUFFER_SIZE];
 
+        //
+        // the result code describing why starttls() failed; defaults to a
+        // generic STARTTLS failure and is narrowed to a protocol-rejection
+        // code when the server actively refuses the pre-TLS negotiation
+        //
+        cert_result_t m_result_code;
+
     private:
         int bio_gets(BIO *_bio, const char *_function);
         int bio_read(BIO *_bio, const char *_function);
+
+        //
+        // parse the leading 3-digit reply code from an SMTP/FTP response line;
+        // returns -1 if the line doesn't begin with a numeric code
+        //
+        static int reply_code(const char *_line, int _len);
 
         //
         // "STARTTLS" functions
@@ -43,6 +56,11 @@ class ccert_protocol
         bool starttls();
         bool init(SSL *_ssl);
         bool shutdown(SSL *_ssl);
+
+        //
+        // the result code describing the most recent starttls() failure
+        //
+        cert_result_t result_code() const { return this->m_result_code; }
 };
 
 #endif // CCERT_PROTOCOL_H

@@ -7,11 +7,12 @@
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 #include <cstring>
+#include <cctype>
 
 #include "ccert_protocol.h"
 #include "clog.h"
 
-ccert_protocol::ccert_protocol(const cert_protocol_t _protocol) : m_protocol(_protocol), m_sbio(nullptr)
+ccert_protocol::ccert_protocol(const cert_protocol_t _protocol) : m_protocol(_protocol), m_sbio(nullptr), m_result_code(cert_result_t::NETWORK_STARTTLS_FAILURE)
 {
     std::memset(this->m_buffer, 0, sizeof(this->m_buffer));
 }
@@ -28,11 +29,28 @@ int ccert_protocol::bio_gets(BIO *_bio, const char *_function)
     int len = BIO_gets(_bio, this->m_buffer, BUFFER_SIZE);
     if (len <= 0)
     {
-        clog::instance().log(LOG_ERROR, "{}: failed on BIO_gets()", _function);
+        clog::instance().log(LOG_WARN, "{}: failed on BIO_gets()", _function);
         return len;
     }
 
     this->m_buffer[len] = '\0';
+
+    //
+    // a line longer than the buffer comes back without its newline; drain the
+    // remainder so the next read starts on a real line boundary and our
+    // continuation / capability checks never run against a fragment
+    //
+    if (this->m_buffer[len - 1] != '\n')
+    {
+        char drain[BUFFER_SIZE];
+        int d = 0;
+
+        do
+        {
+            d = BIO_gets(_bio, drain, BUFFER_SIZE);
+
+        } while( (d > 0) && (drain[d - 1] != '\n') );
+    }
 
     return len;
 }
@@ -41,13 +59,33 @@ int ccert_protocol::bio_read(BIO *_bio, const char *_function)
     int len = BIO_read(_bio, this->m_buffer, BUFFER_SIZE - 1);
     if (len <= 0)
     {
-        clog::instance().log(LOG_ERROR, "{}: failed on BIO_read()", _function);
+        clog::instance().log(LOG_WARN, "{}: failed on BIO_read()", _function);
         return len;
     }
 
     this->m_buffer[len] = '\0';
 
     return len;
+}
+
+//
+// parse the leading 3-digit reply code from an SMTP/FTP response line;
+// returns -1 if the line doesn't begin with a numeric code
+//
+int ccert_protocol::reply_code(const char *_line, int _len)
+{
+    if ( (_line == nullptr) || (_len < 3) )
+    {
+        return -1;
+    }
+    if ( (isdigit((unsigned char)_line[0]) == 0) ||
+         (isdigit((unsigned char)_line[1]) == 0) ||
+         (isdigit((unsigned char)_line[2]) == 0) )
+    {
+        return -1;
+    }
+
+    return ((_line[0] - '0') * 100) + ((_line[1] - '0') * 10) + (_line[2] - '0');
 }
 
 //
@@ -238,16 +276,17 @@ bool ccert_protocol::smtp()
     BIO *fbio = BIO_new(BIO_f_buffer());
     if (fbio == nullptr)
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::smtp(): failed on BIO_new().");
+        clog::instance().log(LOG_WARN, "ccert_protocol::smtp(): failed on BIO_new().");
         return false;
     }
     
     BIO_push(fbio, this->m_sbio);
 
     //
-    // read the initial multi-line response off the buffer
+    // read the initial multi-line banner off the buffer
     //
-    int len = 0;
+    int len  = 0;
+    int code = -1;
     do
     {
         len = this->bio_gets(fbio, "ccert_protocol::smtp()");
@@ -258,7 +297,23 @@ bool ccert_protocol::smtp()
             return false;
         }
 
+        code = ccert_protocol::reply_code(this->m_buffer, len);
+
     } while( (len > 3) && (this->m_buffer[3] == '-') );
+
+    //
+    // a non-2xx/3xx banner means the server is refusing the connection
+    //
+    if ( (code < 0) || (code >= 400) )
+    {
+        BIO_pop(fbio);
+        BIO_free(fbio);
+
+        clog::instance().log(LOG_WARN, "ccert_protocol::smtp(): server rejected connection (code {}).", code);
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
+        return false;
+    }
 
     //
     // send the hello
@@ -274,9 +329,10 @@ bool ccert_protocol::smtp()
     BIO_flush(fbio);
 
     //
-    // read multi-line response off the buffer
+    // read the multi-line EHLO response off the buffer
     //
     bool found_starttls = false;
+    code = -1;
     do
     {
         len = this->bio_gets(fbio, "ccert_protocol::smtp()");
@@ -287,6 +343,8 @@ bool ccert_protocol::smtp()
             return false;
         }
 
+        code = ccert_protocol::reply_code(this->m_buffer, len);
+
         if (strstr(this->m_buffer, "STARTTLS") != nullptr)
         {
             found_starttls = true;
@@ -294,19 +352,62 @@ bool ccert_protocol::smtp()
 
     } while( (len > 3) && (this->m_buffer[3] == '-') );
 
-    BIO_flush(fbio);
-    BIO_pop(fbio);
-    BIO_free(fbio);
+    if ( (code < 0) || (code >= 400) )
+    {
+        BIO_pop(fbio);
+        BIO_free(fbio);
 
+        clog::instance().log(LOG_WARN, "ccert_protocol::smtp(): EHLO rejected (code {}).", code);
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
+        return false;
+    }
     if (found_starttls == false)
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::smtp(): didn't find STARTTLS under response.");
+        BIO_pop(fbio);
+        BIO_free(fbio);
+
+        clog::instance().log(LOG_WARN, "ccert_protocol::smtp(): didn't find STARTTLS under response.");
         return false;
     }
 
-    BIO_printf(this->m_sbio, "STARTTLS\r\n");
-    if (this->bio_read(this->m_sbio, "ccert_protocol::smtp()") <= 0)
+    //
+    // issue STARTTLS through the same buffered BIO and read the (possibly
+    // multi-line) reply through it, so no read-ahead bytes are lost and the
+    // parsed code is guaranteed to be the reply to STARTTLS
+    //
+    BIO_printf(fbio, "STARTTLS\r\n");
+    BIO_flush(fbio);
+
+    code = -1;
+    do
     {
+        len = this->bio_gets(fbio, "ccert_protocol::smtp()");
+        if (len <= 0)
+        {
+            BIO_pop(fbio);
+            BIO_free(fbio);
+            return false;
+        }
+
+        code = ccert_protocol::reply_code(this->m_buffer, len);
+
+    } while( (len > 3) && (this->m_buffer[3] == '-') );
+
+    //
+    // nothing should be left buffered before the TLS handshake takes over the
+    // raw socket; if there is, the server pipelined unexpectedly
+    //
+    size_t leftover = BIO_ctrl_pending(fbio);
+
+    BIO_pop(fbio);
+    BIO_free(fbio);
+
+    if ( (code < 0) || (code >= 400) || (leftover > 0) )
+    {
+        clog::instance().log(LOG_WARN, "ccert_protocol::smtp(): STARTTLS rejected (code {}, leftover {}).", code, leftover);
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
         return false;
     }
 
@@ -317,7 +418,7 @@ bool ccert_protocol::imap()
     BIO *fbio = BIO_new(BIO_f_buffer());
     if (fbio == nullptr)
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::imap(): failed on BIO_new()");
+        clog::instance().log(LOG_WARN, "ccert_protocol::imap(): failed on BIO_new()");
         return false;
     }
 
@@ -358,19 +459,49 @@ bool ccert_protocol::imap()
 
     } while( (len > 3) && (this->m_buffer[0] != '.') );
 
-    BIO_flush(fbio);
-    BIO_pop(fbio);
-    BIO_free(fbio);
-
     if (found_starttls == false)
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::imap(): didn't find STARTTLS under CAPABILITY response.");
+        BIO_pop(fbio);
+        BIO_free(fbio);
+
+        clog::instance().log(LOG_WARN, "ccert_protocol::imap(): didn't find STARTTLS under CAPABILITY response.");
         return false;
     }
 
-    BIO_printf(this->m_sbio, ". STARTTLS\r\n");
-    if (this->bio_read(this->m_sbio, "ccert_protocol::imap()") <= 0)
+    //
+    // issue STARTTLS through the same buffered BIO and read the tagged reply
+    // through it; untagged ("*") lines are skipped until our tag (".") returns
+    //
+    BIO_printf(fbio, ". STARTTLS\r\n");
+    BIO_flush(fbio);
+
+    do
     {
+        len = this->bio_gets(fbio, "ccert_protocol::imap()");
+        if (len <= 0)
+        {
+            BIO_pop(fbio);
+            BIO_free(fbio);
+            return false;
+        }
+
+    } while( (len > 0) && (this->m_buffer[0] != '.') );
+
+    //
+    // a tagged "NO"/"BAD" means STARTTLS was refused; anything left buffered
+    // before the handshake would be read as plaintext, so fail on that too
+    //
+    bool accepted = (len > 0) && (strstr(this->m_buffer, "OK") != nullptr);
+    size_t leftover = BIO_ctrl_pending(fbio);
+
+    BIO_pop(fbio);
+    BIO_free(fbio);
+
+    if ( (accepted == false) || (leftover > 0) )
+    {
+        clog::instance().log(LOG_WARN, "ccert_protocol::imap(): STARTTLS rejected by server (leftover {}).", leftover);
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
         return false;
     }
 
@@ -378,14 +509,50 @@ bool ccert_protocol::imap()
 }
 bool ccert_protocol::pop3()
 {
-    if (this->bio_read(this->m_sbio, "ccert_protocol::pop3()") <= 0)
+    BIO *fbio = BIO_new(BIO_f_buffer());
+    if (fbio == nullptr)
     {
+        clog::instance().log(LOG_WARN, "ccert_protocol::pop3(): failed on BIO_new()");
         return false;
     }
 
-    BIO_printf(this->m_sbio, "STLS\r\n");
-    if (this->bio_read(this->m_sbio, "ccert_protocol::pop3()") <= 0)
+    BIO_push(fbio, this->m_sbio);
+
+    //
+    // read the greeting; a server that isn't ready replies with "-ERR"
+    //
+    int len = this->bio_gets(fbio, "ccert_protocol::pop3()");
+    if ( (len <= 0) || (strncmp(this->m_buffer, "+OK", 3) != 0) )
     {
+        BIO_pop(fbio);
+        BIO_free(fbio);
+
+        clog::instance().log(LOG_WARN, "ccert_protocol::pop3(): server rejected connection.");
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
+        return false;
+    }
+
+    //
+    // issue STLS and read the reply through the same buffered BIO, so no
+    // read-ahead bytes are lost before the TLS handshake takes over the socket
+    //
+    BIO_printf(fbio, "STLS\r\n");
+    BIO_flush(fbio);
+
+    len = this->bio_gets(fbio, "ccert_protocol::pop3()");
+
+    bool accepted = (len > 0) && (strncmp(this->m_buffer, "+OK", 3) == 0);
+    size_t leftover = BIO_ctrl_pending(fbio);
+
+    BIO_pop(fbio);
+    BIO_free(fbio);
+
+    if ( (accepted == false) || (leftover > 0) )
+    {
+        clog::instance().log(LOG_WARN, "ccert_protocol::pop3(): STLS rejected by server (leftover {}).", leftover);
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
         return false;
     }
 
@@ -396,15 +563,16 @@ bool ccert_protocol::ftp()
     BIO *fbio = BIO_new(BIO_f_buffer());
     if (fbio == nullptr)
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::ftp(): failed on BIO_new()");
+        clog::instance().log(LOG_WARN, "ccert_protocol::ftp(): failed on BIO_new()");
         return false;
     }
 
     BIO_push(fbio, this->m_sbio);
-    int len = 0;
+    int len  = 0;
+    int code = -1;
 
     //
-    // read multi-line response off the buffer
+    // read the multi-line banner off the buffer
     //
     do
     {
@@ -416,15 +584,57 @@ bool ccert_protocol::ftp()
             return false;
         }
 
+        code = ccert_protocol::reply_code(this->m_buffer, len);
+
     } while( (len > 3) && (this->m_buffer[3] == '-') );
 
+    //
+    // a non-2xx/3xx banner means the server is refusing the connection
+    //
+    if ( (code < 0) || (code >= 400) )
+    {
+        BIO_pop(fbio);
+        BIO_free(fbio);
+
+        clog::instance().log(LOG_WARN, "ccert_protocol::ftp(): server rejected connection (code {}).", code);
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
+        return false;
+    }
+
+    //
+    // issue AUTH TLS through the same buffered BIO and read the (possibly
+    // multi-line) reply through it, so no read-ahead bytes are lost before the
+    // handshake takes over the raw socket
+    //
+    BIO_printf(fbio, "AUTH TLS\r\n");
     BIO_flush(fbio);
+
+    code = -1;
+    do
+    {
+        len = this->bio_gets(fbio, "ccert_protocol::ftp()");
+        if (len <= 0)
+        {
+            BIO_pop(fbio);
+            BIO_free(fbio);
+            return false;
+        }
+
+        code = ccert_protocol::reply_code(this->m_buffer, len);
+
+    } while( (len > 3) && (this->m_buffer[3] == '-') );
+
+    size_t leftover = BIO_ctrl_pending(fbio);
+
     BIO_pop(fbio);
     BIO_free(fbio);
 
-    BIO_printf(this->m_sbio, "AUTH TLS\r\n");
-    if (this->bio_read(this->m_sbio, "ccert_protocol::ftp()") <= 0)
+    if ( (code < 0) || (code >= 400) || (leftover > 0) )
     {
+        clog::instance().log(LOG_WARN, "ccert_protocol::ftp(): AUTH TLS rejected (code {}, leftover {}).", code, leftover);
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
         return false;
     }
 
@@ -444,7 +654,7 @@ bool ccert_protocol::ldap()
     BIO *ldapbio = BIO_new(BIO_s_mem());
     if (ldapbio == nullptr)
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::ldap(): failed on BIO_new()");
+        clog::instance().log(LOG_WARN, "ccert_protocol::ldap(): failed on BIO_new()");
         return false;
     }
     CONF *conf = NCONF_new(nullptr);
@@ -452,7 +662,7 @@ bool ccert_protocol::ldap()
     {
         BIO_free(ldapbio);
 
-        clog::instance().log(LOG_ERROR, "ccert_protocol::ldap(): failed on NCONF_new()");
+        clog::instance().log(LOG_WARN, "ccert_protocol::ldap(): failed on NCONF_new()");
         return false;
     }
 
@@ -464,7 +674,7 @@ bool ccert_protocol::ldap()
         BIO_free(ldapbio);
         NCONF_free(conf);
 
-        clog::instance().log(LOG_ERROR, "ccert_protocol::ldap(): failed on NCONF_load_bio()");
+        clog::instance().log(LOG_WARN, "ccert_protocol::ldap(): failed on NCONF_load_bio()");
         return false;
     }
 
@@ -475,7 +685,7 @@ bool ccert_protocol::ldap()
     {
         NCONF_free(conf);
 
-        clog::instance().log(LOG_ERROR, "ccert_protocol::ldap(): failed on NCONF_get_string()");
+        clog::instance().log(LOG_WARN, "ccert_protocol::ldap(): failed on NCONF_get_string()");
         return false;
     }
 
@@ -484,7 +694,7 @@ bool ccert_protocol::ldap()
     {
         NCONF_free(conf);
 
-        clog::instance().log(LOG_ERROR, "ccert_protocol::ldap(): failed on NCONF_get_string()");
+        clog::instance().log(LOG_WARN, "ccert_protocol::ldap(): failed on NCONF_get_string()");
         return false;
     }
 
@@ -494,8 +704,117 @@ bool ccert_protocol::ldap()
     BIO_flush(this->m_sbio);
     ASN1_TYPE_free(atype);
 
-    if (this->bio_read(this->m_sbio, "ccert_protocol::ldap()") <= 0)
+    int len = this->bio_read(this->m_sbio, "ccert_protocol::ldap()");
+    if (len <= 0)
     {
+        return false;
+    }
+
+    //
+    // walk the DER-encoded LDAPMessage (RFC 4511):
+    //
+    //   LDAPMessage ::= SEQUENCE { messageID INTEGER, extendedResp [APPLICATION 24] }
+    //   ExtendedResponse ::= SEQUENCE { resultCode ENUMERATED, ... }
+    //
+    // only a resultCode of 0 (success) permits the TLS handshake to proceed
+    //
+    auto parse_hdr = [&](int _pos, int &_tag, int &_clen) -> int
+    {
+        if ( (_pos + 2) > len )
+        {
+            return -1;
+        }
+        _tag = (unsigned char)this->m_buffer[_pos++];
+
+        int b = (unsigned char)this->m_buffer[_pos++];
+        if (b < 0x80)
+        {
+            _clen = b;
+        } else
+        {
+            int n = b & 0x7F;
+            if ( (n == 0) || (n > 4) || ((_pos + n) > len) )
+            {
+                return -1;
+            }
+            _clen = 0;
+            for(int i = 0; i < n; i++)
+            {
+                _clen = (_clen << 8) | (unsigned char)this->m_buffer[_pos++];
+            }
+        }
+        if ( (_clen < 0) || ((_pos + _clen) > len) )
+        {
+            return -1;
+        }
+        return _pos;
+    };
+
+    int tag  = 0;
+    int clen = 0;
+
+    //
+    // outer LDAPMessage SEQUENCE
+    //
+    int pos = parse_hdr(0, tag, clen);
+    if ( (pos < 0) || (tag != 0x30) )
+    {
+        clog::instance().log(LOG_WARN, "ccert_protocol::ldap(): malformed StartTLS response.");
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
+        return false;
+    }
+
+    //
+    // messageID INTEGER - skip its content
+    //
+    pos = parse_hdr(pos, tag, clen);
+    if ( (pos < 0) || (tag != 0x02) )
+    {
+        clog::instance().log(LOG_WARN, "ccert_protocol::ldap(): malformed StartTLS response.");
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
+        return false;
+    }
+    pos += clen;
+
+    //
+    // extendedResp [APPLICATION 24] (0x78)
+    //
+    pos = parse_hdr(pos, tag, clen);
+    if ( (pos < 0) || (tag != 0x78) )
+    {
+        clog::instance().log(LOG_WARN, "ccert_protocol::ldap(): malformed StartTLS response.");
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
+        return false;
+    }
+
+    //
+    // resultCode ENUMERATED is the first field of the ExtendedResponse
+    //
+    pos = parse_hdr(pos, tag, clen);
+    if ( (pos < 0) || (tag != 0x0A) || (clen < 1) )
+    {
+        clog::instance().log(LOG_WARN, "ccert_protocol::ldap(): malformed StartTLS response.");
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
+        return false;
+    }
+
+    bool success = true;
+    for(int i = 0; i < clen; i++)
+    {
+        if ((unsigned char)this->m_buffer[pos + i] != 0)
+        {
+            success = false;
+        }
+    }
+    if (success == false)
+    {
+        clog::instance().log(LOG_WARN, "ccert_protocol::ldap(): StartTLS refused (resultCode {}).", (unsigned char)this->m_buffer[pos + clen - 1]);
+
+        this->m_result_code = cert_result_t::NETWORK_PROTOCOL_REJECTED;
         return false;
     }
 
@@ -530,17 +849,17 @@ bool ccert_protocol::mysql()
 
     } else if (len < 21)
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::mysql(): mysql packet too short");
+        clog::instance().log(LOG_WARN, "ccert_protocol::mysql(): mysql packet too short");
         return false;
 
     } else if (len != (4 + this->m_buffer[0] + (this->m_buffer[1] << 8) + (this->m_buffer[2] << 16)))
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::mysql(): mysql packet length doesn't match");
+        clog::instance().log(LOG_WARN, "ccert_protocol::mysql(): mysql packet length doesn't match");
         return false;
 
     } else if (this->m_buffer[4] != 0xA)
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::mysql(): only protocol version 10 is supported");
+        clog::instance().log(LOG_WARN, "ccert_protocol::mysql(): only protocol version 10 is supported");
         return false;
     }
 
@@ -549,7 +868,7 @@ bool ccert_protocol::mysql()
     {
         if (pos >= len)
         {
-            clog::instance().log(LOG_ERROR, "ccert_protocol::mysql(): can't confirm server version.");
+            clog::instance().log(LOG_WARN, "ccert_protocol::mysql(): can't confirm server version.");
             return false;
 
         } else if (this->m_buffer[pos++] == '\0')
@@ -559,7 +878,7 @@ bool ccert_protocol::mysql()
     }
     if ((pos + 15) > len)
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::mysql(): handshake packet is too short.");
+        clog::instance().log(LOG_WARN, "ccert_protocol::mysql(): handshake packet is too short.");
         return false;
     }
 
@@ -567,14 +886,14 @@ bool ccert_protocol::mysql()
 
     if (this->m_buffer[pos++] != '\0')  // verify filler
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::mysql(): handshake packet is broken.");
+        clog::instance().log(LOG_WARN, "ccert_protocol::mysql(): handshake packet is broken.");
         return false;
     }
 
     // capability flags[2]
     if (!((this->m_buffer[pos] + (this->m_buffer[pos + 1] << 8)) & 0x800))
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::mysql(): server does not support SSL");
+        clog::instance().log(LOG_WARN, "ccert_protocol::mysql(): server does not support SSL");
         return false;
     }
 
@@ -608,7 +927,7 @@ bool ccert_protocol::postgresql()
     //
     if ( (len != 1) || (this->m_buffer[0] != 'S') )
     {
-        clog::instance().log(LOG_ERROR, "ccert_protocol::postgresql(): failed to init TLS.");
+        clog::instance().log(LOG_WARN, "ccert_protocol::postgresql(): failed to init TLS.");
         return false;
     }
 
