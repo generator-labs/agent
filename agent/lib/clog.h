@@ -23,7 +23,7 @@ class clog : public csingleton<clog>
         };
 
         template<typename... Args>
-        void log(Level level, const char* _file, int _line, std::string_view _fmt, Args&&... _args)
+        static void log(Level level, const char* _file, int _line, std::string_view _fmt, Args&&... _args)
         {
             std::string formatted = std::vformat(_fmt, std::make_format_args(_args...));
             formatted += "\n";

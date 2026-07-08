@@ -37,7 +37,7 @@ public:
 
 class CTaskCertIsIpTest : public ::testing::Test {
 protected:
-    json_t* empty_data;
+    json_t* empty_data = nullptr;
     std::unique_ptr<TestableCertTask> task;
 
     void SetUp() override {
@@ -94,7 +94,7 @@ TEST_F(CTaskCertIsIpTest, ReturnsNoneForMalformedInput) {
 
 class CTaskCertLookupTest : public ::testing::Test {
 protected:
-    json_t* task_data;
+    json_t* task_data = nullptr;
     std::unique_ptr<TestableCertTask> task;
 
     void SetUp() override {

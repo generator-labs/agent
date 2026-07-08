@@ -56,7 +56,7 @@ class ctask_cert : public ctask
 
         std::vector<std::string> lookup(const std::string &_hn, const json_t *_ov, const profile_address_type_t _ad);
 
-        std::string pem(const X509 *_cert);
+        static std::string pem(const X509 *_cert);
         bool valid_protocol() const;
         bool valid_address_type() const;
 

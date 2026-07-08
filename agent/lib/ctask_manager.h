@@ -23,10 +23,10 @@ class ctask_manager : public csingleton<ctask_manager>
     friend class TestableTaskManager;
 
     private:
-        typedef struct {
+        typedef struct pending_task_t {
             std::string id;
-            int type;
-            json_t *data;
+            int type = 0;
+            json_t *data = nullptr;
         } pending_task_t;
 
         typedef struct {

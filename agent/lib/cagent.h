@@ -39,8 +39,8 @@ class cagent : public csingleton<cagent>, public chttp
         static volatile std::sig_atomic_t m_exit_signal;
 
         void env();
-        std::string uuid();
-        std::string local_ip();
+        static std::string uuid();
+        static std::string local_ip();
         void process_signal();
 
     public:

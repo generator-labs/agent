@@ -44,8 +44,8 @@ class ccert_protocol
         bool ldap();
         bool mysql();
         bool postgresql();
-        bool oracle();
-        bool mssql();
+        static bool oracle();
+        static bool mssql();
 
     public:
         explicit ccert_protocol(const cert_protocol_t _protocol);
