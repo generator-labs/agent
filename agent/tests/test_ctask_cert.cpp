@@ -13,11 +13,11 @@ public:
         : ctask_cert(id, data) {}
 
     // Expose private methods for testing
-    profile_address_type_t test_is_ip(const std::string& data) {
+    static profile_address_type_t test_is_ip(const std::string& data) {
         return is_ip(data);
     }
 
-    std::vector<std::string> test_lookup(const std::string& hn, const json_t* ov, profile_address_type_t ad) {
+    static std::vector<std::string> test_lookup(const std::string& hn, const json_t* ov, profile_address_type_t ad) {
         return lookup(hn, ov, ad);
     }
 

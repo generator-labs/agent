@@ -730,7 +730,7 @@ std::vector<std::string> ctask_cert::lookup(const std::string &_hn, const json_t
     //
     // check if the host they gave us is an IP
     //
-    profile_address_type_t type = this->is_ip(_hn);
+    profile_address_type_t type = ctask_cert::is_ip(_hn);
 
     //
     // if the profile type doesn't work with the host type they gave us
@@ -772,7 +772,7 @@ std::vector<std::string> ctask_cert::lookup(const std::string &_hn, const json_t
             }
 
             std::string ov(json_string_value(value));
-            profile_address_type_t ov_type = this->is_ip(ov);
+            profile_address_type_t ov_type = ctask_cert::is_ip(ov);
 
             if ( (ov_type == profile_address_type_t::IPV4) && ((_ad != profile_address_type_t::IPV4) && (_ad != profile_address_type_t::DUAL)) )
             {

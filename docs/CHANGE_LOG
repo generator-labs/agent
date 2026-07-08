@@ -27,9 +27,10 @@ v1.0.1
   failures now log at WARN, and an error-level log is emitted only once per address after all
   retry attempts are exhausted. DNS lookup and ip-override validation failures were also
   downgraded to WARN
-- cleared all cppcheck (--enable=all) findings so the CI static-analysis gate passes: marked the
-  stateless members static (clog::log, cagent::uuid/local_ip, ccert_protocol::oracle/mssql,
-  ctask_cert::pem), gave the uninitialized pending_task_t and test-fixture members default
+- cleared all cppcheck (--enable=all, v2.21) findings so the CI static-analysis gate passes:
+  marked the stateless helpers static (clog::log, cagent::uuid/local_ip, ctask_cert::is_ip/
+  lookup/pem, ccert_protocol::oracle/mssql), suppressed the always-true style warning on the
+  oracle/mssql stubs, gave the uninitialized pending_task_t and test-fixture members default
   initializers, and named the pending_task_t struct to avoid a typedef-linkage warning
 
 v1.0

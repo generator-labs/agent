@@ -52,9 +52,9 @@ class ctask_cert : public ctask
         //
         static int retry_delay_ms(const int _attempt);
 
-        profile_address_type_t is_ip(const std::string &_data);
+        static profile_address_type_t is_ip(const std::string &_data);
 
-        std::vector<std::string> lookup(const std::string &_hn, const json_t *_ov, const profile_address_type_t _ad);
+        static std::vector<std::string> lookup(const std::string &_hn, const json_t *_ov, const profile_address_type_t _ad);
 
         static std::string pem(const X509 *_cert);
         bool valid_protocol() const;

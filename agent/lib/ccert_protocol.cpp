@@ -106,7 +106,6 @@ bool ccert_protocol::starttls()
         }
         case cert_protocol_t::POP3_STARTTLS:
         {
-            // cppcheck-suppress knownConditionTrueFalse
             return this->pop3();
         }
         case cert_protocol_t::FTP_STARTTLS:
@@ -127,10 +126,12 @@ bool ccert_protocol::starttls()
         }
         case cert_protocol_t::ORACLE:
         {
+            // cppcheck-suppress knownConditionTrueFalse
             return this->oracle();
         }
         case cert_protocol_t::MSSQL:
         {
+            // cppcheck-suppress knownConditionTrueFalse
             return this->mssql();
         }
 
