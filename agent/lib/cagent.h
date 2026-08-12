@@ -34,6 +34,7 @@ class cagent : public csingleton<cagent>, public chttp
         std::string m_agent_url;
         std::string m_agent_instance_id;
         std::string m_agent_proxy;
+        std::string m_healthcheck_file;
 
     private:
         static volatile std::sig_atomic_t m_exit_signal;

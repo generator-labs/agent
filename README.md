@@ -48,6 +48,15 @@ Both values are available from the Generator Labs management portal.
 | `GENERATOR_AGENT_MODE` | Set to `SINGLE` to run once and exit, or `PERSISTENT` (default) to run continuously. Use `SINGLE` when running the agent as a scheduled task (e.g. cron) rather than a long-lived service. |
 | `GENERATOR_AGENT_URL` | Override the default platform endpoint URL. Intended for development and testing only. |
 | `GENERATOR_AGENT_PROXY` | HTTP proxy URL for agent-to-platform communication. This proxy is only used for API requests, not for local monitoring checks. |
+| `GENERATOR_AGENT_HEALTHCHECK_FILE` | Path to a heartbeat file the agent rewrites on every check-in cycle, for use by a container health check. Empty by default (nothing is written). Set it to a writable path to enable liveness checking; leave it unset to run with a read-only root filesystem and no writable mount. See [Health Checks](#health-checks). |
+
+### Health Checks
+
+The agent does not listen on a network port, so a container health check has nothing to connect to. Setting `GENERATOR_AGENT_HEALTHCHECK_FILE` gives it a heartbeat file to inspect instead: the agent rewrites that file at the start of every check-in cycle, so its modification time tracks the agent's progress. This detects a *stalled* agent — one still running but no longer making progress — which a plain process check (for example `pgrep`) cannot, and which the orchestrator would otherwise miss because the process is still alive.
+
+Configure the check to compare the file's **modification time**, not merely test that it exists — the file is created once and rewritten each cycle, so an existence check would keep passing on a stalled agent. Allow several check-in cycles of margin: the cycle is 60 seconds and a slow platform request can add up to 30 seconds, so a staleness threshold of a few minutes avoids false restarts. The deployment examples below use 5 minutes.
+
+To run with a **read-only root filesystem**, either leave `GENERATOR_AGENT_HEALTHCHECK_FILE` unset (no file is written, so no writable path is needed — the orchestrator still restarts the container on process exit, just not on a stall), or point it at a small writable volume mounted into the container.
 
 ## Deployment
 
@@ -60,6 +69,7 @@ Create a `.env` file with your agent credentials:
 ```
 GENERATOR_AGENT_SID=your-agent-sid-here
 GENERATOR_AGENT_TOKEN=your-agent-token-here
+GENERATOR_AGENT_HEALTHCHECK_FILE=/tmp/agent-health
 ```
 
 Create a `compose.yaml`:
@@ -76,11 +86,11 @@ services:
     env_file:
       - .env
     healthcheck:
-      test: ["CMD-SHELL", "pgrep agent || exit 1"]
+      test: ["CMD-SHELL", "find /tmp/agent-health -mmin -5 | grep -q ."]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 60s
 
 networks:
   agent-network:
@@ -134,10 +144,13 @@ spec:
           envFrom:
             - secretRef:
                 name: generator-agent
+          env:
+            - name: GENERATOR_AGENT_HEALTHCHECK_FILE
+              value: /tmp/agent-health
           livenessProbe:
             exec:
-              command: ["pgrep", "agent"]
-            initialDelaySeconds: 10
+              command: ["sh", "-c", "find /tmp/agent-health -mmin -5 | grep -q ."]
+            initialDelaySeconds: 60
             periodSeconds: 30
           resources:
             requests:
@@ -192,12 +205,18 @@ Create a task definition (`task-definition.json`):
           "valueFrom": "arn:aws:secretsmanager:us-east-1:YOUR_ACCOUNT_ID:secret:generator-agent:GENERATOR_AGENT_TOKEN::"
         }
       ],
+      "environment": [
+        {
+          "name": "GENERATOR_AGENT_HEALTHCHECK_FILE",
+          "value": "/tmp/agent-health"
+        }
+      ],
       "healthCheck": {
-        "command": ["CMD-SHELL", "pgrep agent || exit 1"],
+        "command": ["CMD-SHELL", "find /tmp/agent-health -mmin -5 | grep -q ."],
         "interval": 30,
         "timeout": 5,
         "retries": 3,
-        "startPeriod": 10
+        "startPeriod": 60
       },
       "logConfiguration": {
         "logDriver": "awslogs",

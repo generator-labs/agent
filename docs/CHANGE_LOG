@@ -2,6 +2,21 @@
 Generator Labs Agent - Change Log
 =================================
 
+v1.0.2
+------
+- cagent::run() can now write a heartbeat file on every pass of the poll loop, so the container
+  can carry an ECS health check. the agent listens on no port and exposes nothing else an
+  external check can reach, which left ECS able to see only whether the process had exited - a
+  wedged agent that never finished a request looked healthy.
+- the path comes from GENERATOR_AGENT_HEALTHCHECK_FILE and is empty by default. when it is unset
+  the agent writes nothing, so the container can run with a read-only root filesystem and no
+  writable mount; set it to a writable path (e.g. a mounted scratch volume) to turn it on.
+  disabled, ECS still restarts the container on process exit - just not on a hang.
+- a check on this file has to compare the modification time, not test for existence: the file is
+  rewritten each cycle and never removed, so -f would pass forever on a hung agent.
+  AGENT_RUN_INTERVAL is 60s, so allow several intervals before declaring it dead.
+
+
 v1.0.1
 ------
 - hardened the pre-TLS (STARTTLS) negotiation:

@@ -3,6 +3,7 @@
 //
 // For the full copyright and license information, please view the LICENSE file that was distributed with this source code.
 //
+#include <cstdio>
 #include <cstring>
 #include <thread>
 #include <arpa/inet.h>
@@ -18,7 +19,7 @@
 
 volatile std::sig_atomic_t cagent::m_exit_signal = 0;
 
-cagent::cagent() : m_running(false), m_agent_mode(agent_mode_t::PERSISTENT), m_signal(0), m_shutdown_deadline(), m_agent_sid(), m_agent_token(), m_agent_url(), m_agent_instance_id(), m_agent_proxy()
+cagent::cagent() : m_running(false), m_agent_mode(agent_mode_t::PERSISTENT), m_signal(0), m_shutdown_deadline(), m_agent_sid(), m_agent_token(), m_agent_url(), m_agent_instance_id(), m_agent_proxy(), m_healthcheck_file()
 {
     curl_global_init(CURL_GLOBAL_ALL);
 
@@ -44,6 +45,7 @@ void cagent::env()
     const char *agent_url   = std::getenv("GENERATOR_AGENT_URL");
     const char *agent_mode  = std::getenv("GENERATOR_AGENT_MODE");
     const char *agent_proxy = std::getenv("GENERATOR_AGENT_PROXY");
+    const char *agent_hc    = std::getenv("GENERATOR_AGENT_HEALTHCHECK_FILE");
 
     if ( (agent_sid == nullptr) || (std::strlen(agent_sid) != 34) )
     {
@@ -82,6 +84,14 @@ void cagent::env()
     // only used to communicate with the agent API endpoint, and not used for any local checks.
     //
     this->m_agent_proxy = ( (agent_proxy != nullptr) && (std::strlen(agent_proxy) > 0) ) ? agent_proxy : "";
+
+    //
+    // optional heartbeat file for a container health check. left empty by default: the agent listens on
+    // no port, so a check needs this file, but writing it requires a writable path - which a customer
+    // running a read-only root filesystem may not want to provide. when the variable is unset we write
+    // nothing, and the container simply has no health check (ECS still restarts it on process exit).
+    //
+    this->m_healthcheck_file = ( (agent_hc != nullptr) && (std::strlen(agent_hc) > 0) ) ? agent_hc : "";
 }
 std::string cagent::local_ip()
 {
@@ -204,6 +214,26 @@ void cagent::run()
 
     while(this->m_running == true)
     {
+        //
+        // heartbeat for the container health check. the agent listens on no port and has nothing else
+        // an external check can reach, so this file is the only evidence it is still going round the
+        // loop rather than wedged in a request. it is rewritten every cycle, so a check has to look at
+        // the modification time - the file existing proves only that we started once
+        //
+        // the path comes from GENERATOR_AGENT_HEALTHCHECK_FILE and is empty by default; when unset we
+        // write nothing, so a read-only root filesystem needs no writable mount. point it at a writable
+        // path (a mounted scratch volume) to enable the check. AGENT_RUN_INTERVAL is the poll interval,
+        // so a check should allow several of those before calling it hung
+        //
+        if (this->m_healthcheck_file.empty() == false)
+        {
+            FILE *hb = fopen(this->m_healthcheck_file.c_str(), "w");
+            if (hb != nullptr)
+            {
+                fclose(hb);
+            }
+        }
+
         this->process_signal();
         if (this->m_running == false)
         {
