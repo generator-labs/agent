@@ -2,7 +2,7 @@
 Generator Labs Agent - Change Log
 =================================
 
-v1.0.2
+v1.0.1
 ------
 - cagent::run() can now write a heartbeat file on every pass of the poll loop, so the container
   can carry an ECS health check. the agent listens on no port and exposes nothing else an
@@ -15,10 +15,6 @@ v1.0.2
 - a check on this file has to compare the modification time, not test for existence: the file is
   rewritten each cycle and never removed, so -f would pass forever on a hung agent.
   AGENT_RUN_INTERVAL is 60s, so allow several intervals before declaring it dead.
-
-
-v1.0.1
-------
 - hardened the pre-TLS (STARTTLS) negotiation:
   - smtp/imap/ftp/pop3 now validate the STARTTLS/STLS/AUTH TLS reply (the SMTP/FTP reply code,
     POP3 "+OK", the IMAP tagged "OK") and read it through the buffered BIO with a leftover-bytes
@@ -48,6 +44,6 @@ v1.0.1
   oracle/mssql stubs, gave the uninitialized pending_task_t and test-fixture members default
   initializers, and named the pending_task_t struct to avoid a typedef-linkage warning
 
-v1.0
-----
+v1.0.0
+------
 - initial release
