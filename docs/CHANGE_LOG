@@ -2,6 +2,13 @@
 Generator Labs Agent - Change Log
 =================================
 
+v1.0.2
+------
+- the image runs apk upgrade before adding packages, so it carries alpine's security fixes even
+  when the base image lags. picks up brotli-libs 1.2.1-r0 for CVE-2026-111497 (out-of-bounds
+  write in the brotli decoder): the agent asks for compressed responses, so libcurl decodes br
+  from the agent endpoint with this library. 1.0.1 shipped 1.2.0-r1
+
 v1.0.1
 ------
 - cagent::run() can now write a heartbeat file on every pass of the poll loop, so the container
