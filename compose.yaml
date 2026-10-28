@@ -10,15 +10,20 @@ services:
         - ghcr.io/generator-labs/agent:${VERSION}
     tty: false
     stdin_open: false
+    user: "1000:1000"
+    read_only: true
+    # the heartbeat file (/tmp/healthy) the health check reads
+    tmpfs:
+      - /tmp:size=16m,mode=1777
     restart: unless-stopped
     env_file:
       - .env
     healthcheck:
-      test: ["CMD-SHELL", "pgrep agent || exit 1"]
+      test: ["CMD-SHELL", "[ $$(( $$(date +%s) - $$(stat -c %Y /tmp/healthy) )) -lt 300 ]"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 120s
 networks:
   agent-network:
     enable_ipv6: true
